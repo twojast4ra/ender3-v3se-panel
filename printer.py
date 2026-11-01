@@ -11,9 +11,7 @@ from collections import deque
 import serial
 from serial.tools import list_ports
 
-from prefs import Prefs
-
-HERE = os.path.dirname(os.path.abspath(__file__))
+from prefs import HERE, Prefs
 BED_X, BED_Y, Z_MAX = 220, 220, 250
 LONG_CMDS = ("G28", "G29", "M8015", "M303", "M48", "M701", "M702", "M600", "M190", "M109")
 BAUDS = (115200, 150000, 250000)
