@@ -3,8 +3,10 @@ Stored as JSON next to the app (config.json, not in git). Missing keys fall back
 """
 import json
 import os
+import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# next to the .exe when packaged by PyInstaller, next to the source otherwise
+HERE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")
 
 DEFAULTS = {

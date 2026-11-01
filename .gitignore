@@ -7,3 +7,4 @@ dist/
 *.spec
 tools/*.log
 tests/test_config.json
+release/
