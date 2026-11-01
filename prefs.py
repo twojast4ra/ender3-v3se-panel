@@ -1,0 +1,66 @@
+"""User preferences for the control panel: everything that used to be a hard-coded number.
+Stored as JSON next to the app (config.json, not in git). Missing keys fall back to DEFAULTS.
+"""
+import json
+import os
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PATH = os.path.join(HERE, "config.json")
+
+DEFAULTS = {
+    "tooltips": True,
+    "port": "",                     # "" = find the printer automatically
+    "baud": 0,                      # 0 = try the usual rates until the printer answers
+    "geometry": "",                 # window size and position, remembered on close
+    "steps_mm": [0.1, 1, 10, 50],   # jog step choices
+    "feed_xy": 3000,                # jog speeds, mm/min
+    "feed_z": 300,
+    "feed_e": 300,
+    "extrude_mm": 10,               # default length for Extrude / Retract
+    "extrude_min_c": 180,           # refuse to push filament below this nozzle temperature
+    "nozzle_max": 300,              # upper limits offered; capped further by what the firmware allows
+    "bed_max": 110,
+    "presets": {                    # material -> nozzle / bed
+        "ABS": {"nozzle": 270, "bed": 100},
+        "PLA": {"nozzle": 200, "bed": 60},
+        "PETG": {"nozzle": 250, "bed": 70},
+        "TPU": {"nozzle": 220, "bed": 50},
+    },
+    "pid_nozzle_c": 270,            # PID tune temperatures
+    "pid_bed_c": 100,
+    "probe_repeat_n": 5,            # touches in the probe repeatability test
+    "zoffset_step": 0.05,           # the +/- buttons on the Level tab
+    "level_min_bed_c": 60,          # warn before levelling with the bed below this
+    "log_to_file": True,            # session log under logs\
+}
+
+
+class Prefs:
+    def __init__(self, path=PATH):
+        self.path = path
+        self.data = json.loads(json.dumps(DEFAULTS))
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    stored = json.load(f)
+                for k, v in stored.items():
+                    if k in DEFAULTS:
+                        self.data[k] = v
+            except (OSError, json.JSONDecodeError):
+                pass
+
+    def save(self):
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, indent=2)
+
+    def __getitem__(self, k):
+        return self.data[k]
+
+    def __setitem__(self, k, v):
+        self.data[k] = v
+
+    def reset(self):
+        self.data = json.loads(json.dumps(DEFAULTS))

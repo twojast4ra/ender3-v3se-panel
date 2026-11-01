@@ -1,0 +1,9 @@
+config.json
+logs/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+tools/*.log
+tests/test_config.json
