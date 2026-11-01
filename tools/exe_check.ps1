@@ -6,7 +6,7 @@ $alive = -not $p.HasExited
 $cfg = Test-Path 'C:\kiro\build\out\config.json'
 $log = Get-ChildItem 'C:\kiro\build\out\logs' -ErrorAction SilentlyContinue | Select-Object -First 1
 $logtail = if ($log) { Get-Content $log.FullName | Select-Object -Last 3 } else { @('no log') }
-Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+Get-Process Ender3V3SE-panel -ErrorAction SilentlyContinue | Stop-Process -Force
 "alive after 12 s: $alive"
 "config written: $cfg"
 "log: $($log.Name)"
