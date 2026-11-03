@@ -5,9 +5,27 @@ import json
 import os
 import sys
 
-# next to the .exe when packaged by PyInstaller, next to the source otherwise
+# next to the program (the .exe or the Linux binary) when packaged by PyInstaller, next to the source otherwise
 HERE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-PATH = os.path.join(HERE, "config.json")
+
+
+def _data_dir():
+    """config.json and logs/ go next to the program, as before. When that folder is not writable
+    (a binary copied to /usr/local/bin, a read-only share) they go to the user's own folder instead."""
+    if os.access(HERE, os.W_OK):
+        return HERE
+    if sys.platform.startswith("win"):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "Ender3V3SE-panel")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        d = os.path.join(base, "ender3-v3se-panel")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+DATA_DIR = _data_dir()
+PATH = os.path.join(DATA_DIR, "config.json")
 
 DEFAULTS = {
     "tooltips": True,
@@ -33,7 +51,8 @@ DEFAULTS = {
     "probe_repeat_n": 5,            # touches in the probe repeatability test
     "zoffset_step": 0.05,           # the +/- buttons on the Level tab
     "level_min_bed_c": 60,          # warn before levelling with the bed below this
-    "log_to_file": True,            # session log under logs\
+    "log_to_file": True,            # session log under logs/
+    "alert_when_done": True,        # sound, message window and desktop notification when a print ends
 }
 
 

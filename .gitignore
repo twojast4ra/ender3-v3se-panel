@@ -8,3 +8,4 @@ dist/
 tools/*.log
 tests/test_config.json
 release/
+.build-venv/

@@ -5,6 +5,8 @@ check box, label and group frame whose text appears in TOOLTIPS. Tooltip.enabled
 import tkinter as tk
 from tkinter import ttk
 
+from desktop import font
+
 
 class Tooltip:
     """Small yellow note that appears half a second after the mouse rests on a widget."""
@@ -39,7 +41,7 @@ class Tooltip:
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
         tk.Label(self.tip, text=self.text, justify="left", bg="#fff8c8", fg="#222", relief="solid",
-                 borderwidth=1, wraplength=400, padx=8, pady=5, font=("Segoe UI", 9)).pack()
+                 borderwidth=1, wraplength=400, padx=8, pady=5, font=font(9)).pack()
         Tooltip._open.append(self)
 
     def _hide(self, _e=None):
@@ -107,7 +109,7 @@ TOOLTIPS = {
     "Auto Z offset (one-key: nozzle presses the plate)": "The printer's own routine: it presses the nozzle tip onto the plate and measures the offset itself. Same thing the Level icon on the screen does first. Nozzle must be clean of plastic or the result is off by the blob.",
     "Switches and probe": "The end switches tell the printer where zero is. The probe (the pin next to the nozzle) measures the plate height.",
     "Read switches now": "Asks the printer for the state of its switches. 'open' = not pressed. The head switch should only read TRIGGERED when the head sits at the left stop.",
-    "Switch test (30 s live)": "Shows the switch states live for 30 seconds. Press each switch by hand and watch it flip; a switch that reads TRIGGERED with nothing touching it is the classic cause of prints landing in the wrong place.",
+    "Switch test (30 s live)": "Shows the switch states live for 30 seconds. Press each switch by hand and watch it flip; a head or bed switch that reads TRIGGERED with nothing touching it is the classic cause of prints landing in the wrong place. The probe is the exception: it reads TRIGGERED while its pin is up.",
     "Probe pin down": "Deploys the probe pin. It should drop and the light turn blue.",
     "Probe pin up": "Retracts the probe pin.",
     "Probe self-test": "The probe cycles its pin a few times by itself. Good first check when levelling fails.",
@@ -116,9 +118,13 @@ TOOLTIPS = {
     # print
     "Refresh file list": "Reads the list of files on the card in the printer, with sizes.",
     "Print selected": "Starts the selected file from the card, as if you had picked it on the screen. The printer heats first, then homes, then prints.",
-    "Pause": "Pauses the running print. The nozzle stays hot; resume when ready.",
-    "Resume": "Continues a paused print.",
-    "Cancel print (and cool down)": "Stops the print and switches the heaters and fan off. Cannot be undone.",
+    "Print from this computer": "Prints a gcode file straight from this computer over the USB cable, without copying it to the card first. The computer must stay on and the window open until the end.",
+    "Choose gcode and print...": "Pick a sliced .gcode file and start it at once. The Plate tab loads the same file and follows the layer being sent. Progress, layer and time left show here and in the top bar.",
+    "Running print": "Controls for the print that is running, wherever it was started.",
+    "Print from the card": "Files on the card inside the printer. A card print carries on if this computer sleeps or the cable comes out.",
+    "Pause": "Pauses the running print. From this computer: the moves already sent finish, the filament is pulled back 2 mm, the head lifts 10 mm and moves to the front left; heaters stay on. From the card: the printer's own pause.",
+    "Resume": "Continues a paused print. From this computer: the head goes back to where it stopped, the filament is pushed forward again and the print carries on. Refuses when the nozzle heater was switched off meanwhile.",
+    "Cancel print (and cool down)": "Stops the print and switches the heaters and fan off. A print from this computer also lifts the head and moves it clear. Cannot be undone.",
     "Delete selected": "Removes the selected file from the card. Cannot be undone.",
     "Change filament (M600)": "Parks the head and unloads so you can swap filament mid-print, then resume.",
     "Upload gcode to the card in the printer": "Sends a sliced file over the USB cable onto the card inside the printer, so the card can stay in. Slow (about 5 minutes per 2 MB) because the printer checks every line. Uploaded files show no time or filament estimate on the screen.",
@@ -136,15 +142,19 @@ TOOLTIPS = {
     "Apply X": "Input shaping cancels the ringing (wavy echoes after corners) at the frame's resonance frequency. Needs a measured frequency; wrong values make it worse.",
     "Apply Y": "Same for the bed direction.",
     "Linear advance K": "Compensates the pressure lag in the nozzle so corners are sharp and walls even. 0 = off. Typical 0.02 to 0.1 for a direct-drive printer; needs a calibration print.",
-    "Sensors and screen": "Switches for the printer's safety features and the display.",
-    "Runout sensor ON": "The printer pauses when the filament runs out (the switch the filament passes through).",
-    "Runout sensor OFF": "Ignore the filament sensor. Only if it gives false alarms.",
-    "Power-loss recovery ON": "The printer saves its progress so a print can continue after a power cut.",
-    "Power-loss recovery OFF": "Do not save progress during prints. Slightly less card wear.",
+    "Shaping off": "Switches input shaping off on both axes (frequency 0). Use when a wrong frequency makes things worse.",
+    "Linear advance off": "Sets K to 0, which switches linear advance off.",
+    "Sensors and screen": "Switches for the printer's safety features and the display. A tick shows what the printer has now; a grey box means the printer did not report that setting.",
+    "Filament runout sensor": "Ticked: the printer pauses when the filament runs out (the switch the filament passes through). Untick only if it gives false alarms.",
+    "Power-loss recovery": "Ticked: the printer saves its progress during card prints so they can continue after a power cut. Costs some card writes every layer.",
+    "Bed levelling (mesh compensation)": "Ticked: the printer follows the stored mesh. Unticked: it prints as if the plate were flat. This firmware switches it back on after homing.",
+    "Screen brightness": "The printer's own display, 10 (dim) to 255 (full). Takes effect when you let go of the slider.",
+    "Last report": "What the printer answered to the last probe repeatability test or PID tune, with the time it started.",
     "Beep": "Makes the printer beep once. Handy to check it is listening.",
     # preferences
     "Show hints on hover": "These yellow notes. Switch them off once you know the panel.",
-    "Connection": "Which USB port and speed. Auto finds the printer's CH340 chip and tries the usual speeds (115200, 150000, 250000).",
+    "Alert when a print ends (sound and a message)": "When a print finishes or stops on its own: a sound, a message window, a flashing taskbar button on Windows and a desktop notification on Linux. Not after you cancel.",
+    "Connection": "Which USB port and speed. Auto finds the printer's CH340 chip (COM port on Windows, /dev/ttyUSB0 on Linux) and tries the usual speeds (115200, 150000, 250000).",
     "Connect": "Opens the connection with the port and speed chosen here, and remembers them.",
     "Save preferences": "Writes everything on this tab to config.json next to the program. Presets and steps on the other tabs update at once.",
     "Reset to defaults": "Puts every preference back to the shipped values (not the printer's settings, only this panel's).",
@@ -169,13 +179,13 @@ TEMPERATURES. Nozzle: where the plastic melts. Bed: keeps the first layers stuck
 
 PID. The controller that keeps a heater at its target. It has to be tuned to the heater; untuned it swings and the print waits forever for a steady temperature. Retune after changing hotend or heater (Tools).
 
-STARTING A PRINT. Slice on the PC, upload to the card (Print tab) or put the card in, then Print. The printer heats, homes, draws a purge line along the left edge, then starts. Watch the first layer; it tells you everything. Nudge the Z offset live from the Level tab if it needs it.
+STARTING A PRINT. Slice on the PC, then either print it straight from this computer (Print tab, it starts at once but the computer has to stay on), or upload it to the card or put the card in and print from the card. The printer heats, homes, draws a purge line along the left edge, then starts. Watch the first layer; it tells you everything. Nudge the Z offset live from the Level tab if it needs it.
 
 WHEN SOMETHING LOOKS WRONG. Pause from the Print tab, look, decide. Cancel switches the heaters off. There is no emergency stop in this firmware; the power switch is at the back right. Prints landing off-centre or the probe hunting at one edge: run the switch test.
 
 BACKUPS. Stored settings → Backup to file before any firmware flash. PID values, the Z offset and the mesh are lost on flashing and take an hour to rebuild.
 
-WHAT THE PANEL WILL NOT LET YOU DO. Move before homing. Push filament through a cold nozzle. Move or heat differently while a card print runs (speed, flow, fan, Z nudges, pause and cancel are allowed). Heat beyond the firmware's limits. Go below Z 0 with a jog."""
+WHAT THE PANEL WILL NOT LET YOU DO. Move before homing. Push filament through a cold nozzle. Move or heat differently while a print runs (speed, flow, fan, Z nudges, pause and cancel are allowed). Heat beyond the firmware's limits. Go below Z 0 with a jog."""
 
 
 def attach_tooltips(root):

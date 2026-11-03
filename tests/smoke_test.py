@@ -54,6 +54,41 @@ def step():
     a._refresh_settings()
     print("mesh stats:", a.v_meshstats.get())
     print("graph items", len(a.graph.find_all()))
+    # Tools: the boxes and switches show what the printer has
+    p.state["settings"] = {"M593": [{"X": True, "F": 40.0, "D": 0.15}, {"Y": True, "F": 38.5, "D": 0.1}],
+                           "M900": {"K": 0.04}, "M412": {"S": 1.0}, "M420": {"S": 0.0, "Z": 10.0}}
+    a._refresh_tools()
+    vals = (a.is_x.get(), a.is_xd.get(), a.is_y.get(), a.is_yd.get(), a.la_k.get())
+    assert vals == ("40", "0.15", "38.5", "0.1", "0.04"), vals
+    sw = {g: (var.get(), cb.instate(["alternate"])) for cb, var, g in a._switches}
+    assert sw == {"M412": (1, False), "M413": (0, True), "M420": (0, False)}, sw
+    print("tools boxes", vals, "switches", sw, "pid choices", a.pid_nz["values"][:3], "...", a.pid_bd["values"][-2:])
+    # Last report
+    p.state["report_title"] = "Probe repeatability, 5 touches, 12:00"
+    p.state["report"] = ["Mean: 0.002 Min: -0.003 Max: 0.006 Range: 0.009", "Standard Deviation: 0.003"]
+    a._refresh_report()
+    txt = a.report_boxes[0][1].get("1.0", "end").strip()
+    assert "Standard Deviation" in txt and len(a.report_boxes) == 2, txt
+    # a print from this computer, half way
+    p.state["host"] = {"file": "cambox.gcode", "path": "", "state": "printing", "sent": 500, "total": 1000, "layer": 6,
+                       "layers": 12, "estimate_s": 3600, "started": time.time() - 1800, "paused_s": 0.0,
+                       "paused_at": None, "ended": None, "error": "", "resends": 2, "note": ""}
+    a._refresh_host()
+    print("host line:", a.v_host.get(), "|", a.v_host_note.get(), "| top bar:", a._progress_text())
+    assert "50%" in a.v_host.get() and "layer 6 / 12" in a.v_host.get()
+    p.host_active = lambda: True                 # the top bar and the 3D view during a print from this computer
+    a._tick()
+    assert "PRINTING from this computer" in a.v_busy.get() and a.view3d.homed, (a.v_busy.get(), a.view3d.homed)
+    del p.host_active
+    p.state["host"]["state"] = "done"
+    p.state["host"]["ended"] = time.time()
+    # the finished alert: a message window that does not block
+    a._print_ended({"kind": "host", "how": "done", "file": "cambox.gcode", "elapsed": 3725, "detail": "", "t": time.time()})
+    tops = [w for w in a.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert tops, "no alert window"
+    print("alert:", a.status_msg.get())
+    for w in tops:
+        w.destroy()
     a._save_prefs()
     print("prefs saved, steps", pr["steps_mm"])
     a.destroy()

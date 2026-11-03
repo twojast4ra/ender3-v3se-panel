@@ -2,6 +2,7 @@
 One thread owns the USB serial port; commands run one at a time and wait for 'ok'.
 Temperatures arrive by auto-report (M155). Human actions live in Printer.act().
 """
+import contextlib
 import os
 import re
 import threading
@@ -11,10 +12,22 @@ from collections import deque
 import serial
 from serial.tools import list_ports
 
-from prefs import HERE, Prefs
+from desktop import KeepAwake
+from hostprint import Job, Modes
+from prefs import DATA_DIR, Prefs
+
 BED_X, BED_Y, Z_MAX = 220, 220, 250
-LONG_CMDS = ("G28", "G29", "M8015", "M303", "M48", "M701", "M702", "M600", "M190", "M109")
+LONG_CMDS = ("G28", "G29", "M8015", "M303", "M48", "M701", "M702", "M600", "M190", "M109", "M400")
 BAUDS = (115200, 150000, 250000)
+
+# Reply lines kept for the "Last report" box: probe repeatability (M48) and PID tuning (M303).
+REPORT_WORDS = ("Mean:", "Standard Deviation", "Min:", "Max:", "Range:", "PID Autotune", "Kp:", "Ki:", "Kd:",
+                "bias:", "Ku:", "Tu:", "Classic PID")
+
+# Pausing a print streamed from this computer: pull the filament back a little, lift, move clear.
+PAUSE_RETRACT_MM = 2.0
+PAUSE_LIFT_MM = 10.0
+PARK_X, PARK_Y = 0, 200
 
 # Firmware families seen on this printer. 'caps' are what the firmware itself refuses above.
 FIRMWARE = {
@@ -42,6 +55,7 @@ def find_port():
 class Printer:
     """One thread owns the serial port. Commands run one at a time, each waits for 'ok'."""
 
+    line_timeout = 30                         # seconds to wait for the ok of a streamed line (busy extends it)
     TEMP_RE = re.compile(r"T:\s*([\d.]+)\s*/\s*([\d.]+)\s*B:\s*([\d.]+)\s*/\s*([\d.]+)")
     POS_RE = re.compile(r"X:\s*(-?[\d.]+)\s*Y:\s*(-?[\d.]+)\s*Z:\s*(-?[\d.]+)\s*E:\s*(-?[\d.]+)")
 
@@ -63,6 +77,9 @@ class Printer:
             "last_error": "", "fan": 0, "speed": 100, "flow": 100, "upload": None,
             "task": "",                   # progress text of a multi-step action (prepare, z check)
             "babysteps": 0.0,             # unsaved Z babysteps during a print
+            "report": [], "report_title": "",   # last probe repeatability / PID tune answer
+            "host": None,                 # a print streamed from this computer (dict, see host_start)
+            "finished": None, "finished_seq": 0,  # the last print that ended, for the alert
         }
         self._pending = None
         self._ok = threading.Event()
@@ -70,6 +87,11 @@ class Printer:
         self._hk_count = 0
         self._logfile = None
         self._last_temp_log = 0.0
+        self._want_lock = 0                   # user commands waiting to slip in between streamed lines
+        self._connect_lock = threading.Lock()
+        self._report_until = 0.0
+        self._host_req = None                 # "pause", "resume" or "cancel" for the streaming thread
+        self._sd = {"file": "", "start": None, "frac": 0.0, "cancelled": False, "alerted": False}
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._housekeeping, daemon=True).start()
 
@@ -83,7 +105,7 @@ class Printer:
     def _file_log(self, line):
         try:
             if self._logfile is None:
-                d = os.path.join(HERE, "logs")
+                d = os.path.join(DATA_DIR, "logs")
                 os.makedirs(d, exist_ok=True)
                 self._logfile = open(os.path.join(d, time.strftime("session-%Y%m%d.log")), "a", buffering=1, encoding="utf-8")
             self._logfile.write(line + "\n")
@@ -92,6 +114,18 @@ class Printer:
 
     # ---------- connection ----------
     def connect(self, port=None, baud=None):
+        """One connection attempt at a time: the housekeeping thread reconnects by itself and a
+        Reconnect button press must not open the port a second time alongside it."""
+        if not self._connect_lock.acquire(blocking=False):
+            return False
+        try:
+            if self.ser:
+                return True
+            return self._connect(port, baud)
+        finally:
+            self._connect_lock.release()
+
+    def _connect(self, port=None, baud=None):
         """Open the port (given, preferred, or auto-found) and find the baud rate the printer answers at."""
         if port:
             self.port = port
@@ -129,9 +163,20 @@ class Printer:
             raise RuntimeError(f"no answer on {self.port} at {bauds} (got: {last!r})")
         except Exception as e:  # noqa: BLE001
             self.state["connected"] = False
-            self.state["last_error"] = f"{e}"
+            self.state["last_error"] = self._explain(e)
             self._log("sys", f"connect failed: {e}")
             return False
+
+    def _explain(self, e):
+        """Turn the two common open failures into something a person can act on."""
+        text = f"{e}"
+        if "Permission denied" in text or "Errno 13" in text:
+            return (f"no permission to open {self.port}: add your user to the dialout group "
+                    "(sudo usermod -aG dialout $USER), then log out and back in")
+        if "Access is denied" in text or "PermissionError" in text:
+            return (f"{self.port} is in use by another program (OctoPrint, Pronterface, Cura's monitor); "
+                    "close it, then Reconnect")
+        return text
 
     def _apply_firmware(self, text):
         line = next((l for l in text.splitlines() if "FIRMWARE_NAME" in l), "")
@@ -207,6 +252,15 @@ class Printer:
         p = self.POS_RE.search(line)
         if p:
             self.state["pos"] = {"x": float(p.group(1)), "y": float(p.group(2)), "z": float(p.group(3))}
+        if any(w in line for w in REPORT_WORDS):
+            now = time.time()
+            if now > self._report_until:          # a report typed in the console, not started by a button
+                self.state["report"] = []
+                self.state["report_title"] = time.strftime("%H:%M")
+            self._report_until = max(self._report_until, now + 60)
+            self.state["report"] = (self.state["report"] + [line.replace("echo:", "").strip()])[-40:]
+        if line.startswith("Done printing file"):
+            self._sd_ended("done")
         if self._pending is not None:
             self._pending.append(line)
         if line.startswith("ok") or line.startswith("Error") or line.startswith("error"):
@@ -218,8 +272,15 @@ class Printer:
         """Send one line, return its reply lines (up to and including ok)."""
         if not self.ser:
             raise RuntimeError("not connected")
-        with self.lock:
+        self._want_lock += 1                  # a streaming print steps aside between two lines
+        try:
+            self.lock.acquire()
+        finally:
+            self._want_lock -= 1
+        try:
             return self._send_locked(gcode, timeout)
+        finally:
+            self.lock.release()
 
     def _send_locked(self, gcode, timeout=None, quiet=False):
         word = gcode.split()[0].upper()
@@ -306,21 +367,47 @@ class Printer:
         r = self.send("M27")
         for l in r:
             if "SD printing byte" in l:
+                if not self.state["printing"]:
+                    self._sd_started()
                 self.state["printing"] = True
                 prog = l.replace("SD printing byte", "").strip()
                 self.state["print_progress"] = prog
                 try:
                     a, b = prog.split("/")
                     self.state["print_bytes"] = (int(a), int(b))
+                    if int(b):
+                        self._sd["frac"] = int(a) / int(b)
                 except ValueError:
                     pass
                 return
             if "Not SD printing" in l:
                 if self.state["printing"]:
                     self._log("sys", "print finished or stopped")
+                    if self._sd["frac"] >= 0.995:
+                        self._sd_ended("done")
                 self.state["printing"] = False
                 self.state["print_progress"] = ""
                 self.state["print_bytes"] = (0, 0)
+
+    def _sd_started(self, name=""):
+        self._sd.update({"file": name or self._sd.get("file") or "", "start": time.time(), "frac": 0.0,
+                         "cancelled": False, "alerted": False})
+
+    def _sd_ended(self, how):
+        """A card print ended. 'Done printing file' from the firmware, or the last poll near 100%.
+        A cancel from this panel raises no alert, and neither does a pause from the screen."""
+        sd = self._sd
+        if sd["alerted"] or sd["cancelled"]:
+            return
+        sd["alerted"] = True
+        elapsed = time.time() - sd["start"] if sd["start"] else None
+        self._finish("card", how, sd["file"] or "card print", elapsed)
+
+    def _finish(self, kind, how, name, elapsed, detail=""):
+        self.state["finished"] = {"kind": kind, "how": how, "file": name, "elapsed": elapsed,
+                                  "detail": detail, "t": time.time()}
+        self.state["finished_seq"] += 1
+        self._log("sys", f"print {how}: {name}" + (f" ({detail})" if detail else ""))
 
     def refresh_sd(self):
         r = self.send("M20")
@@ -351,11 +438,11 @@ class Printer:
         while True:
             time.sleep(2)
             if not self.ser:
-                if (self.prefs["port"] or find_port()) and not self.state["last_error"].startswith("no answer"):
+                if (self.prefs["port"] or find_port()) and not self.state["last_error"].startswith(("no answer", "no permission")):
                     self.connect()                  # printer just came on
                 continue
-            if self.lock.locked():
-                continue
+            if self.lock.locked() or self.host_active():
+                continue                            # a streaming print keeps the line to itself
             try:
                 self.refresh_position()
                 self._hk_count += 1
@@ -378,7 +465,7 @@ class Printer:
         (queue.cpp: 'No Checksum' error otherwise), strips comments from serial input, and
         writes each command plus CRLF. So comments and blank lines are dropped here, each line
         goes as 'N<n> <cmd>*<xor>', and a 'Resend: <n>' reply restarts from n."""
-        if self.state["printing"]:
+        if self.is_printing():
             raise ValueError("printing; the card is in use")
         name = (card_name or self.sd_name(path)).upper()
         cmds = []
@@ -444,6 +531,244 @@ class Printer:
             self._log("sys", up["error"])
         return up
 
+    # ---------- printing from this computer ----------
+    # The file is streamed over USB one line at a time, the way OctoPrint and Pronterface do it:
+    # each line goes as 'N<n> <cmd>*<xor>' and the next waits for the printer's 'ok'. A 'Resend: n'
+    # restarts from n. When an ok goes missing the same numbered line is sent again; Marlin answers a
+    # line number it already has with a resend request for the next one, so nothing runs twice.
+    # The computer has to stay on and connected until the end; KeepAwake stops it sleeping.
+
+    def host_active(self):
+        h = self.state["host"]
+        return bool(h) and h["state"] in ("starting", "printing", "pausing", "paused", "resuming")
+
+    def is_printing(self):
+        return bool(self.state["printing"]) or self.host_active()
+
+    def host_start(self, path):
+        if not self.ser:
+            raise ValueError("not connected")
+        if self.is_printing():
+            raise ValueError("a print is already running")
+        job = Job(path)
+        h = {"file": job.name, "path": path, "state": "starting", "sent": 0, "total": len(job.cmds),
+             "layer": 0, "layers": job.layers, "estimate_s": job.estimate_s, "started": time.time(),
+             "paused_s": 0.0, "paused_at": None, "ended": None, "error": "", "resends": 0, "note": ""}
+        self._host_req = None
+        self.state["host"] = h
+        threading.Thread(target=self._host_run, args=(job, h), daemon=True).start()
+        return h
+
+    def host_request(self, what):
+        h = self.state["host"]
+        if not self.host_active():
+            raise ValueError("no print from this computer is running")
+        if what == "pause" and h["state"] != "printing":
+            raise ValueError("not printing right now (" + h["state"] + ")")
+        if what == "resume" and h["state"] != "paused":
+            raise ValueError("not paused")
+        self._host_req = what
+
+    def _host_line(self, n, cmd):
+        """Send one numbered line, wait for its ok. Returns (reply lines, timed_out)."""
+        body = f"N{n} {cmd}".encode()
+        cs = 0
+        for ch in body:
+            cs ^= ch
+        data = body + b"*%d\n" % cs
+        word = cmd.split(None, 1)[0].upper()
+        timeout = 900 if word in LONG_CMDS else self.line_timeout
+        with self.lock:
+            self._pending = []
+            self._ok.clear()
+            self.ser.write(data)
+            deadline = time.time() + timeout
+            got = True
+            while not self._ok.wait(0.2):
+                if self._host_req == "cancel":
+                    got = False                 # stop waiting; the cancel commands queue behind this line
+                    break
+                if time.time() - self._last_busy < 10:
+                    deadline = max(deadline, time.time() + 10)
+                if time.time() > deadline:
+                    got = False
+                    break
+            if got:
+                # an Error line sets the event first; its Resend and ok follow straight after
+                t_end = time.time() + 5
+                while not any(l.startswith("ok") for l in self._pending) and time.time() < t_end:
+                    self._ok.clear()
+                    self._ok.wait(0.05)
+            reply = self._pending
+            self._pending = None
+        return reply, not got
+
+    def _host_run(self, job, h):
+        awake = KeepAwake()
+        awake.start()                           # same thread as stop(): Windows ties it to the thread
+        modes = Modes()
+        modes.homed = all(self.state["homed"].values())
+        how, detail = "failed", ""
+
+        def acknowledge(idx):
+            cmd = job.cmds[idx]
+            modes.track(cmd)
+            if cmd[:3].upper() == "G28":
+                modes.homed = True
+            if all(v is not None for v in modes.pos.values()):
+                self.state["pos"] = dict(modes.pos)       # what the printer was told, a few moves ahead
+            h["sent"] = idx + 1
+            h["layer"] = job.layer_of[idx]
+        try:
+            with self.lock:
+                self._send_locked("M110 N0", 10)
+            self._log("sys", f"printing {job.name} from this computer: {len(job.cmds)} lines, {job.layers} layers")
+            h["state"] = "printing"
+            total = len(job.cmds)
+            i = 0
+            timeouts = 0
+            same_resends = 0
+            last_resend = None
+            while True:
+                if i >= total:
+                    self.send("M400", 900)      # every line acknowledged: wait for the last moves
+                    how = "done"
+                    break
+                req = self._host_req
+                if req == "cancel":
+                    how = "cancelled"
+                    break
+                if h["state"] == "paused":
+                    if req == "resume":
+                        self._host_req = None
+                        self._host_resume(h, modes)
+                    else:
+                        time.sleep(0.1)
+                    continue
+                if req == "pause":
+                    self._host_req = None
+                    self._host_pause(h, modes)
+                    continue
+                if not self.ser:
+                    raise RuntimeError("USB connection lost")
+                spins = 0
+                while self._want_lock and spins < 500:   # let a button's command in between two lines
+                    time.sleep(0.002)
+                    spins += 1
+                reply, timed_out = self._host_line(i + 1, job.cmds[i])
+                halted = next((l for l in reply if "kill() called" in l or "Printer halted" in l or l.startswith("!!")), None)
+                if halted:
+                    raise RuntimeError(f"the printer stopped itself: {halted}")
+                resend = [l for l in reply if l.startswith("Resend:") or l.startswith("rs ")]
+                if resend:
+                    digits = re.sub(r"\D", "", resend[-1])
+                    n = int(digits) if digits else i + 1
+                    if n == i + 2:
+                        # this line was a repeat after a lost ok: the printer had it and wants the next
+                        acknowledge(i)
+                        i += 1
+                        continue
+                    same_resends = same_resends + 1 if n == last_resend else 0
+                    last_resend = n
+                    if same_resends > 20:
+                        raise RuntimeError(f"line {n} keeps failing its check; the USB cable or port is unreliable")
+                    h["resends"] += 1
+                    i = max(0, min(n - 1, i))        # never skip a line the printer has not confirmed
+                    continue
+                if timed_out:
+                    if self._host_req == "cancel":
+                        continue
+                    timeouts += 1
+                    if timeouts >= 6:
+                        raise RuntimeError(f"no answer from the printer for line {i + 1} ({job.cmds[i]})")
+                    self._log("sys", f"no ok for line {i + 1}; sending it again")
+                    continue
+                timeouts = 0
+                acknowledge(i)
+                i += 1
+        except Exception as e:  # noqa: BLE001
+            how, detail = "failed", f"{e}"
+            self._log("sys", f"print from this computer failed: {e}")
+        finally:
+            if how == "cancelled":
+                try:
+                    self._host_cancel_moves(modes)
+                except Exception as e:  # noqa: BLE001
+                    detail = f"cancel commands not all sent: {e}"
+            if how == "failed" and self.ser:
+                try:                            # whatever went wrong, do not leave the heaters on
+                    self.send_many(["M104 S0", "M140 S0", "M106 S0"])
+                    detail += "; heaters switched off"
+                except Exception:  # noqa: BLE001
+                    detail += "; could not switch the heaters off: switch the printer off"
+            elif how == "failed":
+                detail += "; the printer may still be heating: switch it off"
+            h["state"], h["error"], h["ended"] = how, detail, time.time()
+            self._host_req = None
+            awake.stop()
+            elapsed = h["ended"] - h["started"] - h["paused_s"]
+            self._finish("host", how, job.name, elapsed, detail)
+
+    def _host_pause(self, h, modes):
+        h["state"] = "pausing"
+        self.send("M400", 900)                  # the moves already queued in the printer finish first
+        self.send("M114")
+        pos = dict(self.state["pos"]) if self.state["pos"] else {}
+        if not all(k in pos for k in ("x", "y", "z")):
+            pos = {k: v for k, v in modes.pos.items() if v is not None}
+        h["pause_pos"] = pos
+        retract = (self.state["nozzle"] or 0) >= self.prefs["extrude_min_c"]
+        h["retracted"] = retract
+        cmds = ["M83", f"G1 E-{PAUSE_RETRACT_MM:.1f} F1800"] if retract else []
+        z = pos.get("z")
+        lift = PAUSE_LIFT_MM if z is None else max(0.0, min(PAUSE_LIFT_MM, Z_MAX - z))
+        cmds += ["G91", f"G0 Z{lift:.2f} F600", "G90"]
+        if modes.homed and "x" in pos and "y" in pos:
+            cmds.append(f"G0 X{PARK_X} Y{PARK_Y} F3000")
+        self.send_many(cmds)
+        h["paused_at"] = time.time()
+        h["state"] = "paused"
+        h["note"] = "paused: head lifted and moved clear, heaters on"
+        self._log("sys", f"paused at line {h['sent']} (X{pos.get('x')} Y{pos.get('y')} Z{pos.get('z')})")
+
+    def _host_resume(self, h, modes):
+        target = self.state["nozzle_target"] or 0
+        if target < self.prefs["extrude_min_c"]:
+            h["note"] = "the nozzle heater is off or too low: set it back to printing temperature, then Resume"
+            return
+        h["state"] = "resuming"
+        h["note"] = "resuming"
+        pos = h.get("pause_pos") or {}
+        cmds = []
+        if (self.state["nozzle"] or 0) < target - 3:
+            cmds.append(f"M109 S{target:.0f}")
+        cmds.append("G90")
+        if "x" in pos and "y" in pos:
+            cmds.append(f"G0 X{pos['x']:.3f} Y{pos['y']:.3f} F3000")
+        if "z" in pos:
+            cmds.append(f"G0 Z{pos['z']:.3f} F600")
+        if h.get("retracted"):
+            cmds += ["M83", f"G1 E{PAUSE_RETRACT_MM:.1f} F1800"]
+        cmds.append("M82" if modes.abs_e else "M83")          # put back what the file was using
+        if not modes.abs_xyz:
+            cmds.append("G91")
+        if modes.feed:
+            cmds.append(f"G1 F{modes.feed:.0f}")
+        self.send_many(cmds)
+        h["paused_s"] += time.time() - (h["paused_at"] or time.time())
+        h["paused_at"] = None
+        h["state"] = "printing"
+        h["note"] = ""
+        self._log("sys", f"resumed at line {h['sent'] + 1}")
+
+    def _host_cancel_moves(self, modes):
+        z = modes.pos.get("z")
+        lift = PAUSE_LIFT_MM if z is None else max(0.0, min(PAUSE_LIFT_MM, Z_MAX - z))
+        cmds = ["M108", "M104 S0", "M140 S0", "M106 S0", "G91", f"G0 Z{lift:.2f} F600", "G90"]
+        if modes.homed:
+            cmds.append(f"G0 X{PARK_X} Y{PARK_Y} F3000")
+        self.send_many(cmds)
+
     # ---------- settings backup / restore ----------
     def backup_settings(self, path):
         self.refresh_settings()
@@ -467,16 +792,28 @@ class Printer:
         self.refresh_settings()
         return sent
 
+    @contextlib.contextmanager
+    def _report(self, title):
+        """Collect the printer's answer to a button (probe test, PID tune) for the Last report box.
+        A bed tune runs for many minutes with long gaps, so the box stays open for the whole command."""
+        self.state["report"] = []
+        self.state["report_title"] = f"{title}, {time.strftime('%H:%M')}"
+        self._report_until = time.time() + 7200
+        try:
+            yield
+        finally:
+            self._report_until = time.time() + 5
+
     # ---------- human actions ----------
     def act(self, action, p):
         """Translate a UI action into gcode. Returns reply lines. Raises ValueError on refusal."""
         st = self.state
         pr = self.prefs
-        printing = st["printing"]
+        printing = self.is_printing()
 
         def need_idle():
             if printing:
-                raise ValueError("printing from SD; only speed, flow, fan, Z babysteps, pause, resume and cancel are allowed")
+                raise ValueError("printing; only speed, flow, fan, Z babysteps, pause, resume and cancel are allowed")
 
         def need_homed(*axes):
             missing = [a for a in axes if not st["homed"].get(a)]
@@ -633,7 +970,11 @@ class Printer:
                        "M413", "M851", "M593", "M900", "M603", "M412", "M255", "M256"}
             if g not in allowed:
                 raise ValueError(f"{g} not editable here")
-            parts = [g] + [f"{k.upper()}{v}" for k, v in p["params"].items()]
+            # an empty box is left out: "M593 X F D" would read the blank frequency as 0 and switch shaping off
+            parts = [g] + [f"{k.upper()}{str(v).strip()}" for k, v in p["params"].items()
+                           if v is not None and str(v).strip() != ""]
+            if len(parts) == 1 or g == "M593" and all(x[0] in "XY" for x in parts[1:]):
+                raise ValueError("nothing to set: the boxes are empty")
             r = self.send_many([" ".join(parts), "M500"])
             self.refresh_settings()
             return r
@@ -658,21 +999,25 @@ class Printer:
         if action == "probe_repeat":
             need_idle()
             need_homed("x", "y", "z")
-            return self.send(f"M48 P{int(p.get('count', pr['probe_repeat_n']))} V2")
+            n = int(p.get("count", pr["probe_repeat_n"]))
+            with self._report(f"Probe repeatability, {n} touches"):
+                return self.send(f"M48 P{n} V2")
         if action == "pid_nozzle":
             need_idle()
-            t = int(p.get("temp", pr["pid_nozzle_c"]))
+            t = int(float(p.get("temp", pr["pid_nozzle_c"])))
             if t > self.nozzle_limit():
                 raise ValueError(f"above the nozzle limit {self.nozzle_limit()}")
-            r = self.send_many([f"M303 E0 S{t} C8 U1", "M500"])
+            with self._report(f"Nozzle PID tune at {t} °C"):
+                r = self.send_many([f"M303 E0 S{t} C8 U1", "M500"])
             self.refresh_settings()
             return r
         if action == "pid_bed":
             need_idle()
-            t = int(p.get("temp", pr["pid_bed_c"]))
+            t = int(float(p.get("temp", pr["pid_bed_c"])))
             if t > self.bed_limit():
                 raise ValueError(f"above the bed limit {self.bed_limit()}")
-            r = self.send_many([f"M303 E-1 S{t} C8 U1", "M500"])
+            with self._report(f"Bed PID tune at {t} °C"):
+                r = self.send_many([f"M303 E-1 S{t} C8 U1", "M500"])
             self.refresh_settings()
             return r
         if action == "filament":
@@ -683,18 +1028,34 @@ class Printer:
             return self.refresh_sd()
         if action == "sd_print":
             need_idle()
+            self._sd_started(p["file"])
             r = self.send_many([f"M23 {p['file']}", "M24"])
             self.refresh_print()
             return r
-        if action == "sd_pause":
+        if action == "host_print":
+            need_idle()
+            h = self.host_start(p["path"])
+            return [f"printing {h['file']} from this computer: {h['total']} lines"]
+        # Pause, Resume and Cancel act on whichever print runs: from this computer or from the card.
+        if action in ("pause", "sd_pause"):
+            if self.host_active():
+                self.host_request("pause")
+                return ["pausing after the moves already sent"]
             r = self.send("M25")
             self.refresh_print()
             return r
-        if action == "sd_resume":
+        if action in ("resume", "sd_resume"):
+            if self.host_active():
+                self.host_request("resume")
+                return ["resuming"]
             r = self.send("M24")
             self.refresh_print()
             return r
-        if action == "sd_cancel":
+        if action in ("cancel", "sd_cancel"):
+            if self.host_active():
+                self.host_request("cancel")
+                return ["cancelling: heaters off, head lifted and moved clear"]
+            self._sd["cancelled"] = True
             r = self.send_many(["M524", "M104 S0", "M140 S0", "M106 S0"])
             self.refresh_print()
             return r

@@ -7,6 +7,8 @@ two Z uprights at the back carrying the X gantry, head in front of the gantry.
 """
 import tkinter as tk
 
+from desktop import font, mono
+
 BED = 220
 Y_NOZZLE = 150          # gantry plane in frame Y (uprights sit just behind it)
 Y_UPRIGHT = 176         # front face of the Z uprights
@@ -91,14 +93,14 @@ class PrinterView(tk.Canvas):
             self._box(rx - 4, rx + 4, -70, 250, -15, -9, "#505050", fr)
         self._box(185, 250, -78, -44, -15, 8, "#2a2a2a", fr)
         self._poly([self.P(190, -78, -10), self.P(245, -78, -10), self.P(245, -78, 4), self.P(190, -78, 4)], fill=COL["screen"], outline="")
-        self.create_text(*self.P(100, -78, -30), text="CREALITY", fill="#888", font=("Segoe UI", 7, "bold"))
+        self.create_text(*self.P(100, -78, -30), text="CREALITY", fill="#888", font=font(7, "bold"))
 
         # bed carriage and plate: plate top at z = 0, front edge at frame Y = Y_NOZZLE - y
         yf = Y_NOZZLE - y
         self._box(0, BED, yf, yf + BED, -9, 0, c_b, fr, dash)
         self._poly([self.P(3, yf + 3, 0.1), self.P(BED - 3, yf + 3, 0.1), self.P(BED - 3, yf + BED - 3, 0.1), self.P(3, yf + BED - 3, 0.1)],
                    fill=COL["plate"], outline="")
-        self.create_text(*self.P(BED / 2, yf - 16, 1), text="bed", fill=COL["text"], font=("Segoe UI", 8))
+        self.create_text(*self.P(BED / 2, yf - 16, 1), text="bed", fill=COL["text"], font=font(8))
         px, py = self.P(x, Y_NOZZLE, 0.2)
         self.create_oval(px - 3, py - 3, px + 3, py + 3, fill=c_h, outline="")
 
@@ -116,15 +118,15 @@ class PrinterView(tk.Canvas):
         for bx in (-38, 226):
             self._box(bx, bx + 32, Y_UPRIGHT - 30, Y_UPRIGHT + 18, zg - 18, zg + 18, self._shade(c_g, 0.8), fr, dash)
         self._box(-30, 250, Y_NOZZLE - 4, Y_NOZZLE + 16, zg - 10, zg + 10, c_g, fr, dash)
-        self.create_text(*self.P(254, Y_NOZZLE, zg + 26), text="gantry", fill=COL["text"], anchor="w", font=("Segoe UI", 8))
+        self.create_text(*self.P(254, Y_NOZZLE, zg + 26), text="gantry", fill=COL["text"], anchor="w", font=font(8))
 
         # head on the gantry's front face, down to the nozzle tip
         self._box(x - 17, x + 17, Y_NOZZLE - 20, Y_NOZZLE - 4, z + 6, zg + 16, c_h, fr, dash)
         tx, ty = self.P(x, Y_NOZZLE - 12, z)
         self.create_polygon(tx - 4, ty - 7, tx + 4, ty - 7, tx, ty, fill="#bbb", outline="")
-        self.create_text(*self.P(x, Y_NOZZLE - 36, z + 30), text="head", fill=COL["text"], font=("Segoe UI", 8))
+        self.create_text(*self.P(x, Y_NOZZLE - 36, z + 30), text="head", fill=COL["text"], font=font(8))
         self.create_line(tx, ty, px, py, fill="#666", dash=(2, 3))
 
         # readout
         txt = f"head X {x:.1f}   bed Y {y:.1f}   gantry Z {z:.2f}" if self.homed else "not homed: positions are a guess"
-        self.create_text(8, 8, text=txt, fill=COL["text"], anchor="nw", font=("Consolas", 9))
+        self.create_text(8, 8, text=txt, fill=COL["text"], anchor="nw", font=mono(9))

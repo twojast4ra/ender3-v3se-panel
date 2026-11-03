@@ -1,9 +1,12 @@
 """Plate view: the sliced paths of a gcode file, one layer at a time, with the head's
 reported position on top. Layer follows the printer's Z unless the slider is moved.
 """
+import os
 import re
 import tkinter as tk
 from tkinter import filedialog, ttk
+
+from desktop import font
 
 BED = 220
 NUM = re.compile(r"([XYZEF])(-?\d*\.?\d+)")
@@ -99,13 +102,21 @@ class PlateView(ttk.Frame):
 
     def _load(self):
         path = filedialog.askopenfilename(title="Gcode", filetypes=[("gcode", "*.gcode *.gco *.g"), ("all", "*.*")])
-        if not path:
-            return
+        if path:
+            self.load_path(path)
+
+    def load_path(self, path):
         self.layers = parse_gcode(path)
-        self.v_file.set(f"{path.split('/')[-1]}  ({len(self.layers)} layers)")
+        self.v_file.set(f"{os.path.basename(path)}  ({len(self.layers)} layers)")
         self.slider.configure(to=max(0, len(self.layers) - 1))
         self.layer_idx.set(0)
         self.follow.set(True)
+        self.redraw()
+
+    def set_layer(self, idx):
+        """Show a given layer (a print from this computer knows which layer it is sending)."""
+        if self.follow.get() and self.layers:
+            self.layer_idx.set(max(0, min(int(idx), len(self.layers) - 1)))
         self.redraw()
 
     def set_position(self, pos):
@@ -132,8 +143,8 @@ class PlateView(ttk.Frame):
         for g in range(0, BED + 1, 55):
             c.create_line(*self.C(g, 0), *self.C(g, BED), fill="#3a3a3a")
             c.create_line(*self.C(0, g), *self.C(BED, g), fill="#3a3a3a")
-        c.create_text(*self.C(BED / 2, -6), text="front", fill="#aaa", font=("Segoe UI", 8))
-        c.create_text(*self.C(-6, BED / 2), text="left", fill="#aaa", font=("Segoe UI", 8), angle=90)
+        c.create_text(*self.C(BED / 2, -6), text="front", fill="#aaa", font=font(8))
+        c.create_text(*self.C(-6, BED / 2), text="left", fill="#aaa", font=font(8), angle=90)
         if self.layers:
             i = min(self.layer_idx.get(), len(self.layers) - 1)
             z, segs = self.layers[i]
